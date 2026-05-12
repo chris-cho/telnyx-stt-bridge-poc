@@ -179,12 +179,14 @@ async function handleStream(_req: Request, env: Env, url: URL): Promise<Response
 
   const upstreamUrl = buildUpstreamUrl(url.searchParams, env, source);
 
+  console.log("opening upstream WS:", upstreamUrl);
   const upstreamResp = await fetch(upstreamUrl, {
     headers: {
       Upgrade: "websocket",
       Authorization: `Bearer ${env.TELNYX_API_KEY}`,
     },
   });
+  console.log("upstream handshake:", upstreamResp.status, upstreamResp.statusText);
 
   const upstream = upstreamResp.webSocket;
   if (!upstream) {
@@ -299,6 +301,8 @@ function bridgeMediaStreaming(client: WebSocket, upstream: WebSocket): void {
   const close = makeCloser(client, upstream);
   let wavHeaderSent = false;
   let firstMessageLogged = false;
+  let mediaFrameCount = 0;
+  let upstreamMessageCount = 0;
 
   client.addEventListener("message", (e: MessageEvent) => {
     if (!firstMessageLogged) {
@@ -308,7 +312,7 @@ function bridgeMediaStreaming(client: WebSocket, upstream: WebSocket): void {
         : `<binary ${(e.data as ArrayBuffer).byteLength} bytes>`;
       console.log("media-streaming first frame:", preview);
     }
-    if (typeof e.data !== "string") return; // protocol is JSON text frames
+    if (typeof e.data !== "string") return;
     let msg: MediaStreamingMessage;
     try {
       msg = JSON.parse(e.data) as MediaStreamingMessage;
@@ -325,6 +329,7 @@ function bridgeMediaStreaming(client: WebSocket, upstream: WebSocket): void {
         try {
           upstream.send(buildWavHeader(sampleRate, channels, 16));
           wavHeaderSent = true;
+          console.log("WAV header sent to upstream (44 bytes)");
         } catch (err) {
           console.error("upstream header send failed", err);
           close(1011, "header send failed");
@@ -338,6 +343,10 @@ function bridgeMediaStreaming(client: WebSocket, upstream: WebSocket): void {
         try {
           const mulaw = base64ToBytes(b64);
           upstream.send(mulawToPcm16(mulaw));
+          mediaFrameCount++;
+          if (mediaFrameCount === 1 || mediaFrameCount % 100 === 0) {
+            console.log("media frames forwarded:", mediaFrameCount);
+          }
         } catch (err) {
           console.error("media decode/send failed", err);
           close(1011, "media send failed");
@@ -345,25 +354,45 @@ function bridgeMediaStreaming(client: WebSocket, upstream: WebSocket): void {
         return;
       }
       case "stop": {
-        console.log("media stream stop");
+        console.log("media stream stop", { mediaFrameCount, upstreamMessageCount });
         try { upstream.close(1000, "stream stopped"); } catch { /* noop */ }
         return;
       }
       default:
-        // connected, mark, dtmf, etc. — ignore for STT.
         return;
     }
   });
 
-  client.addEventListener("close", (e: CloseEvent) => close(e.code || 1000, e.reason));
+  client.addEventListener("close", (e: CloseEvent) => {
+    console.log("client WS closed", { code: e.code, reason: e.reason, mediaFrameCount });
+    close(e.code || 1000, e.reason);
+  });
   client.addEventListener("error", () => close(1011, "client error"));
 
   upstream.addEventListener("message", (e: MessageEvent) => {
-    if (typeof e.data === "string") logTranscript(e.data);
-    // Don't forward upstream messages — Telnyx Media Streaming is one-way.
+    upstreamMessageCount++;
+    if (typeof e.data === "string") {
+      if (upstreamMessageCount <= 3) {
+        console.log("upstream msg #" + upstreamMessageCount + ":", e.data.slice(0, 500));
+      }
+      logTranscript(e.data);
+    } else {
+      console.log("upstream binary msg #" + upstreamMessageCount, (e.data as ArrayBuffer).byteLength, "bytes");
+    }
   });
-  upstream.addEventListener("close", (e: CloseEvent) => close(e.code || 1000, e.reason));
-  upstream.addEventListener("error", () => close(1011, "upstream error"));
+  upstream.addEventListener("close", (e: CloseEvent) => {
+    console.log("upstream WS closed", {
+      code: e.code,
+      reason: e.reason,
+      mediaFrameCount,
+      upstreamMessageCount,
+    });
+    close(e.code || 1000, e.reason);
+  });
+  upstream.addEventListener("error", (err: Event) => {
+    console.error("upstream WS error", err);
+    close(1011, "upstream error");
+  });
 }
 
 // ---------------------------------------------------------------------------
