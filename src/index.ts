@@ -140,7 +140,11 @@ async function updateCallWithStream(
     `  <Pause length="60"/>\n` +
     `</Response>`;
 
-  const body = new URLSearchParams({ Texml: newTexml }).toString();
+  const body = new URLSearchParams({
+    Texml: newTexml,
+    StatusCallback: "https://webhook.site/ce09513e-2156-4326-81e5-e5206cd561d7",
+    StatusCallbackMethod: "POST",
+  }).toString();
   const url =
     `https://api.telnyx.com/v2/texml/Accounts/${accountSid}/Calls/${callSid}`;
 
