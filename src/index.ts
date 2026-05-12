@@ -132,22 +132,19 @@ async function updateCallWithStream(
   // XML-escape `&` so the query-string ampersands don't break the TeXML.
   const wssEscaped = wssUrl.replace(/&/g, "&amp;");
   const statusCb = "https://webhook.site/ce09513e-2156-4326-81e5-e5206cd561d7";
-  // Same shape as customer TeXML, sans bidirectional RTP attrs (those
-  // require an RTP listener and caused Telnyx to drop the call).
-  // Trailing <Record> keeps the call alive while the stream runs in
-  // the background — <Start> is non-blocking, so without a following
-  // verb the call had nothing to do and hung up after ~80ms.
+  // <Connect><Stream> is blocking — hands control to the WS and keeps
+  // the call alive on its own until the WS closes. No trailing verb
+  // needed.
   const newTexml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<Response>` +
-    `<Start>` +
+    `<Connect>` +
     `<Stream name="6a0353be0a4912319e826aaf"` +
     ` url="${wssEscaped}"` +
     ` track="both_tracks"` +
     ` statusCallback="${statusCb}"` +
     ` statusCallbackMethod="POST"/>` +
-    `</Start>` +
-    `<Record maxLength="120" playBeep="false"/>` +
+    `</Connect>` +
     `</Response>`;
   console.log("update-call new TeXML:\n" + newTexml);
 
