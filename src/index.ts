@@ -132,13 +132,14 @@ async function updateCallWithStream(
   // XML-escape `&` so the query-string ampersands don't break the TeXML.
   const wssEscaped = wssUrl.replace(/&/g, "&amp;");
   const statusCb = "https://webhook.site/ce09513e-2156-4326-81e5-e5206cd561d7";
+  // <Connect><Stream> takes over the call (blocking, bidirectional) instead
+  // of <Start><Stream> which is non-blocking and one-way.
   const newTexml =
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<Response>\n` +
-    `  <Start>\n` +
+    `  <Connect>\n` +
     `    <Stream url="${wssEscaped}" statusCallback="${statusCb}" statusCallbackMethod="POST"/>\n` +
-    `  </Start>\n` +
-    `  <Pause length="60"/>\n` +
+    `  </Connect>\n` +
     `</Response>`;
   console.log("update-call new TeXML:\n" + newTexml);
 
