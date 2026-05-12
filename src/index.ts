@@ -132,9 +132,9 @@ async function updateCallWithStream(
   // XML-escape `&` so the query-string ampersands don't break the TeXML.
   const wssEscaped = wssUrl.replace(/&/g, "&amp;");
   const statusCb = "https://webhook.site/ce09513e-2156-4326-81e5-e5206cd561d7";
-  // <Connect><Stream> is blocking — hands control to the WS and keeps
-  // the call alive on its own until the WS closes. No trailing verb
-  // needed.
+  // <Connect><Stream> with bidirectional RTP attrs. Connect blocks the
+  // call (no trailing verb needed); the bidirectional* attrs may be
+  // negotiated differently under Connect than Start.
   const newTexml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<Response>` +
@@ -142,6 +142,9 @@ async function updateCallWithStream(
     `<Stream name="6a0353be0a4912319e826aaf"` +
     ` url="${wssEscaped}"` +
     ` track="both_tracks"` +
+    ` bidirectionalCodec="PCMU"` +
+    ` bidirectionalSamplingRate="8000"` +
+    ` bidirectionalMode="rtp"` +
     ` statusCallback="${statusCb}"` +
     ` statusCallbackMethod="POST"/>` +
     `</Connect>` +
