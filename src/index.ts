@@ -132,14 +132,22 @@ async function updateCallWithStream(
   // XML-escape `&` so the query-string ampersands don't break the TeXML.
   const wssEscaped = wssUrl.replace(/&/g, "&amp;");
   const statusCb = "https://webhook.site/ce09513e-2156-4326-81e5-e5206cd561d7";
-  // <Connect><Stream> takes over the call (blocking, bidirectional) instead
-  // of <Start><Stream> which is non-blocking and one-way.
+  // Match the customer's TeXML shape: <Start><Stream> with bidirectional
+  // RTP attributes and both_tracks. Stream `name` is an opaque tag used
+  // on stop/clear; reusing the customer's value.
   const newTexml =
-    `<?xml version="1.0" encoding="UTF-8"?>\n` +
-    `<Response>\n` +
-    `  <Connect>\n` +
-    `    <Stream url="${wssEscaped}" statusCallback="${statusCb}" statusCallbackMethod="POST"/>\n` +
-    `  </Connect>\n` +
+    `<?xml version="1.0" encoding="UTF-8"?>` +
+    `<Response>` +
+    `<Start>` +
+    `<Stream name="6a0353be0a4912319e826aaf"` +
+    ` url="${wssEscaped}"` +
+    ` track="both_tracks"` +
+    ` bidirectionalCodec="PCMU"` +
+    ` bidirectionalSamplingRate="8000"` +
+    ` bidirectionalMode="rtp"` +
+    ` statusCallback="${statusCb}"` +
+    ` statusCallbackMethod="POST"/>` +
+    `</Start>` +
     `</Response>`;
   console.log("update-call new TeXML:\n" + newTexml);
 
