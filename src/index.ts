@@ -28,7 +28,9 @@ export interface Env {
   STT_INTERIM_RESULTS: string;
 }
 
-const TELNYX_STT_WS = "wss://api.telnyx.com/v2/speech-to-text/transcription";
+// Workers fetch() requires http(s):// for WS upgrade — the runtime swaps to
+// wss when the Upgrade header is present.
+const TELNYX_STT_WS = "https://api.telnyx.com/v2/speech-to-text/transcription";
 
 type SourceMode = "passthrough" | "telnyx-media-streaming";
 
