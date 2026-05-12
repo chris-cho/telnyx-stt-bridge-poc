@@ -132,9 +132,9 @@ async function updateCallWithStream(
   // XML-escape `&` so the query-string ampersands don't break the TeXML.
   const wssEscaped = wssUrl.replace(/&/g, "&amp;");
   const statusCb = "https://webhook.site/ce09513e-2156-4326-81e5-e5206cd561d7";
-  // Match the customer's TeXML shape: <Start><Stream> with bidirectional
-  // RTP attributes and both_tracks. Stream `name` is an opaque tag used
-  // on stop/clear; reusing the customer's value.
+  // Same shape as customer TeXML but without bidirectional RTP attrs
+  // (those require an RTP listener we don't provide and caused Telnyx
+  // to drop the call). Stream `name` is an opaque tag.
   const newTexml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<Response>` +
@@ -142,9 +142,6 @@ async function updateCallWithStream(
     `<Stream name="6a0353be0a4912319e826aaf"` +
     ` url="${wssEscaped}"` +
     ` track="both_tracks"` +
-    ` bidirectionalCodec="PCMU"` +
-    ` bidirectionalSamplingRate="8000"` +
-    ` bidirectionalMode="rtp"` +
     ` statusCallback="${statusCb}"` +
     ` statusCallbackMethod="POST"/>` +
     `</Start>` +
