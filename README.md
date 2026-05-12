@@ -6,21 +6,46 @@ piping audio one way and transcripts back the other.
 
 ## Architecture
 ```
-client ──(WS, audio binary)──> Worker /stream ──(WS, Bearer auth)──> wss://api.telnyx.com/v2/speech-to-text/transcription
-       <──(WS, transcript JSON)──                                <──
+client ──(WS)──> Worker /stream ──(WS, Bearer auth)──> wss://api.telnyx.com/v2/speech-to-text/transcription
+       <──(WS)──                                  <──
 ```
 
-The Worker is a thin pass-through that:
-- Forwards client query params to Telnyx (`transcription_engine`,
-  `input_format`, `language`, `model`, `interim_results`, `endpointing`,
-  `redact`, `keyterm`, `keywords`, `sample_rate`), applying defaults
-  from env vars when missing.
-- Adds the `Authorization: Bearer <TELNYX_API_KEY>` header on the
-  outbound WS handshake so the client never sees the API key.
-- Pipes binary frames client→Telnyx and JSON messages Telnyx→client.
-- Logs transcripts and errors for observability.
-- Sends `{"type":"session.started"}` / `{"type":"session.ended"}` to
-  the client to bracket the upstream session.
+The Worker:
+- Adds `Authorization: Bearer <TELNYX_API_KEY>` on the outbound WS
+  handshake so the client never sees the API key.
+- Forwards client query params (`transcription_engine`, `input_format`,
+  `language`, `model`, `interim_results`, `endpointing`, `redact`,
+  `keyterm`, `keywords`, `sample_rate`) to Telnyx, with defaults from
+  env vars.
+- Logs transcripts and errors via `wrangler tail`.
+
+## Source modes (`?source=...`)
+Two modes for the inbound side:
+
+### `passthrough` (default)
+Client sends raw **WAV or MP3 binary frames**; Worker forwards as-is.
+Transcripts are sent back over the same WebSocket as JSON. The Worker
+also sends `{"type":"session.started"}` / `{"type":"session.ended"}`
+brackets to the client.
+
+### `telnyx-media-streaming` (use with TeXML `<Stream>`)
+Client (Telnyx) sends Twilio-compatible JSON envelopes:
+```json
+{ "event": "start",  "start": { "media_format": { "encoding": "audio/x-mulaw", "sample_rate": 8000, "channels": 1 } } }
+{ "event": "media",  "media": { "payload": "<base64 μ-law>" } }
+{ "event": "stop" }
+```
+The Worker:
+1. On `start`, sends a streaming 16-bit PCM WAV header to Telnyx STT.
+2. On each `media`, base64-decodes the payload, μ-law→PCM16 decodes it,
+   and sends raw PCM samples to Telnyx STT.
+3. On `stop`, closes the upstream session.
+4. Forces `input_format=wav` regardless of client query param.
+
+Media Streaming is one-way — Telnyx does **not** read responses from the
+WS endpoint. Transcripts are surfaced via `wrangler tail` only. If you
+need them delivered somewhere, add a webhook POST in `logTranscript()`
+or fan them out to another WS.
 
 ## Stack
 - Cloudflare Workers (TypeScript)
@@ -34,9 +59,9 @@ The Worker is a thin pass-through that:
 
 ## Audio format
 Telnyx STT WS expects **WAV** or **MP3** binary frames (selected via
-`input_format`). The Worker passes binary through unchanged. If your
-source is raw μ-law from Telnyx Media Streaming, you'll need to
-transcode upstream of this Worker (out of scope here).
+`input_format`). In `passthrough` mode the Worker forwards binary
+unchanged. In `telnyx-media-streaming` mode it synthesizes a 16-bit
+PCM WAV stream from inbound μ-law audio.
 
 ## Query params on `/stream`
 Forwarded to Telnyx as-is. Required by Telnyx, with defaults:
@@ -66,10 +91,23 @@ cp .dev.vars.example .dev.vars   # fill in TELNYX_API_KEY
 npm run dev                      # ws://localhost:8787/stream
 ```
 
-Quick smoke test with `websocat`:
+Quick smoke test with `websocat` (passthrough mode):
 ```bash
-websocat 'ws://localhost:8787/stream?transcription_engine=Telnyx&input_format=wav&language=en' < sample.wav
+websocat -b 'ws://localhost:8787/stream?transcription_engine=Telnyx&input_format=wav&language=en' < sample.wav
 ```
+
+## Using with TeXML
+Return TeXML from your voice webhook to start a bidirectional stream
+into this bridge:
+```xml
+<Response>
+  <Start>
+    <Stream url="wss://telnyx-stt-bridge-poc.solutions-2bd.workers.dev/stream?source=telnyx-media-streaming&amp;transcription_engine=Telnyx&amp;language=en" />
+  </Start>
+  <Pause length="60"/>
+</Response>
+```
+Watch transcripts roll in with `npx wrangler tail --format=pretty`.
 
 ## Deploy
 ```bash

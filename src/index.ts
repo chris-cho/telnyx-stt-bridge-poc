@@ -3,18 +3,21 @@
  *
  *   client --(WS)--> Worker /stream --(WS)--> wss://api.telnyx.com/v2/speech-to-text/transcription
  *
- * - Client opens a WebSocket to /stream?engine=...&language=...&model=...
- *   (query params are forwarded as-is to Telnyx, with sensible defaults from env).
- * - The Worker opens an outbound WS to Telnyx STT with Bearer auth and
- *   bidirectionally pipes:
- *     client -> Telnyx : binary audio frames (WAV/MP3 per input_format)
- *     Telnyx -> client : JSON transcript / error messages
- * - The Worker also sends a `{"type":"session.started"}` to the client on
- *   upstream open, and `{"type":"session.ended"}` on close.
+ * Two source modes (set with ?source=...):
  *
- * Audio format note:
- *   Telnyx STT WS expects WAV or MP3 frames. If your source is raw μ-law
- *   from Telnyx Media Streaming, you'd need to transcode (out of scope here).
+ *   passthrough (default)
+ *     Client sends raw WAV/MP3 binary frames; Worker forwards as-is.
+ *
+ *   telnyx-media-streaming  (use this with TeXML <Stream>)
+ *     Client sends Twilio-compatible JSON envelopes:
+ *       { event: "connected" | "start" | "media" | "mark" | "stop", ... }
+ *     Worker parses them, μ-law-decodes media.payload, synthesizes a
+ *     streaming 16-bit PCM WAV (header on start, samples on media),
+ *     and forwards to Telnyx STT. Transcripts are logged via wrangler tail.
+ *
+ * Query params passed through to Telnyx (with env defaults):
+ *   transcription_engine, input_format, language, model, interim_results,
+ *   endpointing, redact, keyterm, keywords, sample_rate
  */
 
 export interface Env {
@@ -26,6 +29,8 @@ export interface Env {
 }
 
 const TELNYX_STT_WS = "wss://api.telnyx.com/v2/speech-to-text/transcription";
+
+type SourceMode = "passthrough" | "telnyx-media-streaming";
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -46,14 +51,18 @@ export default {
   },
 };
 
-async function handleStream(req: Request, env: Env, url: URL): Promise<Response> {
+async function handleStream(_req: Request, env: Env, url: URL): Promise<Response> {
   if (!env.TELNYX_API_KEY) {
     return new Response("TELNYX_API_KEY not configured", { status: 500 });
   }
 
-  const upstreamUrl = buildUpstreamUrl(url.searchParams, env);
+  const source: SourceMode =
+    url.searchParams.get("source") === "telnyx-media-streaming"
+      ? "telnyx-media-streaming"
+      : "passthrough";
 
-  // Open outbound WS to Telnyx with Bearer auth.
+  const upstreamUrl = buildUpstreamUrl(url.searchParams, env, source);
+
   const upstreamResp = await fetch(upstreamUrl, {
     headers: {
       Upgrade: "websocket",
@@ -72,25 +81,35 @@ async function handleStream(req: Request, env: Env, url: URL): Promise<Response>
   }
   upstream.accept();
 
-  // Inbound WS pair.
   const pair = new WebSocketPair();
   const client = pair[0];
   const server = pair[1];
   server.accept();
 
-  bridge(server, upstream);
+  if (source === "telnyx-media-streaming") {
+    bridgeMediaStreaming(server, upstream);
+  } else {
+    bridgePassthrough(server, upstream);
+  }
 
   return new Response(null, { status: 101, webSocket: client });
 }
 
-function buildUpstreamUrl(clientParams: URLSearchParams, env: Env): string {
+function buildUpstreamUrl(
+  clientParams: URLSearchParams,
+  env: Env,
+  source: SourceMode,
+): string {
   const params = new URLSearchParams();
 
-  // Required by Telnyx; client may override.
   params.set("transcription_engine", clientParams.get("transcription_engine") ?? env.STT_ENGINE);
-  params.set("input_format", clientParams.get("input_format") ?? env.STT_INPUT_FORMAT);
 
-  // Optional pass-throughs.
+  // In media-streaming mode we synthesize a WAV, so force input_format=wav.
+  const inputFormat = source === "telnyx-media-streaming"
+    ? "wav"
+    : (clientParams.get("input_format") ?? env.STT_INPUT_FORMAT);
+  params.set("input_format", inputFormat);
+
   const passthrough = [
     "language",
     "model",
@@ -106,74 +125,194 @@ function buildUpstreamUrl(clientParams: URLSearchParams, env: Env): string {
     if (v != null) params.set(key, v);
   }
 
-  // Defaults for common optionals when not provided.
   if (!params.has("language")) params.set("language", env.STT_LANGUAGE);
   if (!params.has("interim_results")) params.set("interim_results", env.STT_INTERIM_RESULTS);
 
   return `${TELNYX_STT_WS}?${params.toString()}`;
 }
 
-function bridge(client: WebSocket, upstream: WebSocket): void {
-  let closed = false;
-  const closeBoth = (code = 1000, reason = "") => {
-    if (closed) return;
-    closed = true;
-    try { client.close(code, reason); } catch { /* noop */ }
-    try { upstream.close(code, reason); } catch { /* noop */ }
-  };
+// ---------------------------------------------------------------------------
+// Passthrough bridge: client sends WAV/MP3 binary, transcripts go back.
+// ---------------------------------------------------------------------------
 
-  // Notify client of upstream session lifecycle.
+function bridgePassthrough(client: WebSocket, upstream: WebSocket): void {
+  const close = makeCloser(client, upstream);
+
   try {
     client.send(JSON.stringify({ type: "session.started" }));
   } catch (err) {
     console.error("client send failed", err);
   }
 
-  // client -> upstream: forward audio frames (binary) and any control text.
   client.addEventListener("message", (e: MessageEvent) => {
     try {
       upstream.send(e.data as ArrayBuffer | string);
     } catch (err) {
       console.error("upstream send failed", err);
-      closeBoth(1011, "upstream send failed");
+      close(1011, "upstream send failed");
     }
   });
+  client.addEventListener("close", (e: CloseEvent) => close(e.code || 1000, e.reason));
+  client.addEventListener("error", () => close(1011, "client error"));
 
-  client.addEventListener("close", (e: CloseEvent) => {
-    console.log("client closed", e.code, e.reason);
-    closeBoth(e.code || 1000, e.reason);
-  });
-
-  client.addEventListener("error", (err: Event) => {
-    console.error("client ws error", err);
-    closeBoth(1011, "client error");
-  });
-
-  // upstream -> client: forward transcripts / errors. Log final transcripts.
   upstream.addEventListener("message", (e: MessageEvent) => {
-    if (typeof e.data === "string") {
-      logTranscript(e.data);
-    }
+    if (typeof e.data === "string") logTranscript(e.data);
     try {
       client.send(e.data as ArrayBuffer | string);
     } catch (err) {
       console.error("client send failed", err);
-      closeBoth(1011, "client send failed");
+      close(1011, "client send failed");
     }
   });
-
   upstream.addEventListener("close", (e: CloseEvent) => {
-    console.log("upstream closed", e.code, e.reason);
     try {
       client.send(JSON.stringify({ type: "session.ended", code: e.code, reason: e.reason }));
     } catch { /* noop */ }
-    closeBoth(e.code || 1000, e.reason);
+    close(e.code || 1000, e.reason);
+  });
+  upstream.addEventListener("error", () => close(1011, "upstream error"));
+}
+
+// ---------------------------------------------------------------------------
+// Telnyx Media Streaming bridge: parse JSON envelopes, μ-law -> PCM16 WAV.
+// Telnyx Media Streaming is one-way (it doesn't read responses), so we
+// don't echo anything back — transcripts are observed via wrangler tail.
+// ---------------------------------------------------------------------------
+
+function bridgeMediaStreaming(client: WebSocket, upstream: WebSocket): void {
+  const close = makeCloser(client, upstream);
+  let wavHeaderSent = false;
+
+  client.addEventListener("message", (e: MessageEvent) => {
+    if (typeof e.data !== "string") return; // protocol is JSON text frames
+    let msg: MediaStreamingMessage;
+    try {
+      msg = JSON.parse(e.data) as MediaStreamingMessage;
+    } catch {
+      return;
+    }
+
+    switch (msg.event) {
+      case "start": {
+        const fmt = msg.start?.media_format ?? msg.start?.mediaFormat ?? {};
+        const sampleRate = Number(fmt.sample_rate ?? fmt.sampleRate ?? 8000);
+        const channels = Number(fmt.channels ?? 1);
+        console.log("media stream start:", { sampleRate, channels, encoding: fmt.encoding });
+        try {
+          upstream.send(buildWavHeader(sampleRate, channels, 16));
+          wavHeaderSent = true;
+        } catch (err) {
+          console.error("upstream header send failed", err);
+          close(1011, "header send failed");
+        }
+        return;
+      }
+      case "media": {
+        if (!wavHeaderSent) return;
+        const b64 = msg.media?.payload;
+        if (!b64) return;
+        try {
+          const mulaw = base64ToBytes(b64);
+          upstream.send(mulawToPcm16(mulaw));
+        } catch (err) {
+          console.error("media decode/send failed", err);
+          close(1011, "media send failed");
+        }
+        return;
+      }
+      case "stop": {
+        console.log("media stream stop");
+        try { upstream.close(1000, "stream stopped"); } catch { /* noop */ }
+        return;
+      }
+      default:
+        // connected, mark, dtmf, etc. — ignore for STT.
+        return;
+    }
   });
 
-  upstream.addEventListener("error", (err: Event) => {
-    console.error("upstream ws error", err);
-    closeBoth(1011, "upstream error");
+  client.addEventListener("close", (e: CloseEvent) => close(e.code || 1000, e.reason));
+  client.addEventListener("error", () => close(1011, "client error"));
+
+  upstream.addEventListener("message", (e: MessageEvent) => {
+    if (typeof e.data === "string") logTranscript(e.data);
+    // Don't forward upstream messages — Telnyx Media Streaming is one-way.
   });
+  upstream.addEventListener("close", (e: CloseEvent) => close(e.code || 1000, e.reason));
+  upstream.addEventListener("error", () => close(1011, "upstream error"));
+}
+
+// ---------------------------------------------------------------------------
+// μ-law → linear PCM16 (lookup table per ITU-T G.711)
+// ---------------------------------------------------------------------------
+
+const MULAW_TABLE = (() => {
+  const t = new Int16Array(256);
+  for (let i = 0; i < 256; i++) {
+    const u = ~i & 0xff;
+    const sign = u & 0x80;
+    const exponent = (u >> 4) & 0x07;
+    const mantissa = u & 0x0f;
+    let sample = ((mantissa << 3) + 0x84) << exponent;
+    sample -= 0x84;
+    t[i] = sign ? -sample : sample;
+  }
+  return t;
+})();
+
+function mulawToPcm16(mulaw: Uint8Array): Uint8Array {
+  const out = new Uint8Array(mulaw.length * 2);
+  const view = new DataView(out.buffer);
+  for (let i = 0; i < mulaw.length; i++) {
+    view.setInt16(i * 2, MULAW_TABLE[mulaw[i]], true); // little-endian
+  }
+  return out;
+}
+
+// Streaming WAV header (PCM, sizes set to 0xFFFFFFFF since length is unknown).
+function buildWavHeader(sampleRate: number, channels: number, bitsPerSample: number): Uint8Array {
+  const byteRate = (sampleRate * channels * bitsPerSample) / 8;
+  const blockAlign = (channels * bitsPerSample) / 8;
+  const buf = new ArrayBuffer(44);
+  const view = new DataView(buf);
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 0xffffffff, true);   // file size unknown
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);           // fmt chunk size
+  view.setUint16(20, 1, true);            // PCM
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeStr(36, "data");
+  view.setUint32(40, 0xffffffff, true);   // data size unknown
+  return new Uint8Array(buf);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+function makeCloser(client: WebSocket, upstream: WebSocket): (code?: number, reason?: string) => void {
+  let closed = false;
+  return (code = 1000, reason = "") => {
+    if (closed) return;
+    closed = true;
+    try { client.close(code, reason); } catch { /* noop */ }
+    try { upstream.close(code, reason); } catch { /* noop */ }
+  };
 }
 
 function logTranscript(raw: string): void {
@@ -195,7 +334,7 @@ function logTranscript(raw: string): void {
       console.error("telnyx stt error:", msg.error);
     }
   } catch {
-    // Non-JSON upstream message; ignore.
+    /* non-JSON */
   }
 }
 
@@ -204,4 +343,30 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface MediaFormat {
+  encoding?: string;
+  sample_rate?: number | string;
+  sampleRate?: number | string;
+  channels?: number | string;
+}
+
+interface MediaStreamingMessage {
+  event?: string;
+  start?: {
+    media_format?: MediaFormat;
+    mediaFormat?: MediaFormat;
+    [k: string]: unknown;
+  };
+  media?: {
+    payload?: string;
+    track?: string;
+    [k: string]: unknown;
+  };
+  [k: string]: unknown;
 }
