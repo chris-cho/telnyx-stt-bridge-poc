@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "telnyx-stt-bridge-poc",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    // Default STT params; clients can override via query string on /stream.
+    "STT_ENGINE": "Telnyx",
+    "STT_INPUT_FORMAT": "wav",
+    "STT_LANGUAGE": "en",
+    "STT_INTERIM_RESULTS": "true"
+  }
+  // Secrets (set via `wrangler secret put`):
+  //   TELNYX_API_KEY   (required, Bearer token for Telnyx STT WS)
+}

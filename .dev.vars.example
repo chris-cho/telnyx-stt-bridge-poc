@@ -1,0 +1,2 @@
+# Copy to .dev.vars for `wrangler dev`, or set via `wrangler secret put` for prod.
+TELNYX_API_KEY="KEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
