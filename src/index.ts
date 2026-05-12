@@ -44,6 +44,10 @@ export default {
       if (req.headers.get("upgrade") !== "websocket") {
         return new Response("expected websocket upgrade", { status: 426 });
       }
+      console.log("/stream WS upgrade request", {
+        source: url.searchParams.get("source"),
+        ua: req.headers.get("user-agent"),
+      });
       return handleStream(req, env, url);
     }
 
@@ -97,9 +101,11 @@ async function handleTexml(
 
   if (accountSid && callSid) {
     const streamUrl = new URL(req.url);
+    streamUrl.protocol = "wss:";        // <Stream> requires wss://, not https://
     streamUrl.pathname = "/stream";
     streamUrl.search =
       "?source=telnyx-media-streaming&transcription_engine=Telnyx&language=en";
+    console.log("update-call -> stream url:", streamUrl.toString());
     ctx.waitUntil(
       updateCallWithStream(env, accountSid, callSid, streamUrl.toString()),
     );
@@ -284,8 +290,16 @@ function bridgePassthrough(client: WebSocket, upstream: WebSocket): void {
 function bridgeMediaStreaming(client: WebSocket, upstream: WebSocket): void {
   const close = makeCloser(client, upstream);
   let wavHeaderSent = false;
+  let firstMessageLogged = false;
 
   client.addEventListener("message", (e: MessageEvent) => {
+    if (!firstMessageLogged) {
+      firstMessageLogged = true;
+      const preview = typeof e.data === "string"
+        ? e.data.slice(0, 200)
+        : `<binary ${(e.data as ArrayBuffer).byteLength} bytes>`;
+      console.log("media-streaming first frame:", preview);
+    }
     if (typeof e.data !== "string") return; // protocol is JSON text frames
     let msg: MediaStreamingMessage;
     try {
