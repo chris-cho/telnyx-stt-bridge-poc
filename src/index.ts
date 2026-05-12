@@ -131,14 +131,16 @@ async function updateCallWithStream(
 ): Promise<void> {
   // XML-escape `&` so the query-string ampersands don't break the TeXML.
   const wssEscaped = wssUrl.replace(/&/g, "&amp;");
+  const statusCb = "https://webhook.site/ce09513e-2156-4326-81e5-e5206cd561d7";
   const newTexml =
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<Response>\n` +
     `  <Start>\n` +
-    `    <Stream url="${wssEscaped}"/>\n` +
+    `    <Stream url="${wssEscaped}" statusCallback="${statusCb}" statusCallbackMethod="POST"/>\n` +
     `  </Start>\n` +
     `  <Pause length="60"/>\n` +
     `</Response>`;
+  console.log("update-call new TeXML:\n" + newTexml);
 
   const body = new URLSearchParams({
     Texml: newTexml,
@@ -157,11 +159,11 @@ async function updateCallWithStream(
     body,
   });
 
+  const txt = await res.text().catch(() => "");
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
     console.error("update-call failed", res.status, txt);
   } else {
-    console.log("update-call ok, stream injected for", callSid);
+    console.log("update-call ok, stream injected for", callSid, "response:", txt.slice(0, 500));
   }
 }
 
