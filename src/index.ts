@@ -73,18 +73,26 @@ async function handleTexml(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  let form: FormData | null = null;
-  try {
-    form = await req.formData();
-  } catch { /* GET or non-form body */ }
+  // Telnyx may call this with GET (params in query string) or POST (form
+  // body), depending on TeXML App config — read both.
+  const url = new URL(req.url);
+  const params = new Map<string, string>();
+  url.searchParams.forEach((v, k) => params.set(k, v));
+  if (req.method === "POST") {
+    try {
+      const form = await req.formData();
+      form.forEach((v, k) => params.set(k, v.toString()));
+    } catch { /* not form-encoded */ }
+  }
 
-  const accountSid = form?.get("AccountSid")?.toString();
-  const callSid = form?.get("CallSid")?.toString();
+  const accountSid = params.get("AccountSid");
+  const callSid = params.get("CallSid");
   console.log("inbound /texml", {
+    method: req.method,
     accountSid,
     callSid,
-    from: form?.get("From")?.toString(),
-    to: form?.get("To")?.toString(),
+    from: params.get("From"),
+    to: params.get("To"),
   });
 
   if (accountSid && callSid) {
@@ -96,7 +104,7 @@ async function handleTexml(
       updateCallWithStream(env, accountSid, callSid, streamUrl.toString()),
     );
   } else {
-    console.warn("missing AccountSid/CallSid; skipping update-call");
+    console.warn("missing AccountSid/CallSid; skipping update-call", { method: req.method });
   }
 
   const xml =
