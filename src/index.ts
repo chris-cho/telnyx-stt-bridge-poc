@@ -33,7 +33,7 @@ const TELNYX_STT_WS = "wss://api.telnyx.com/v2/speech-to-text/transcription";
 type SourceMode = "passthrough" | "telnyx-media-streaming";
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/") {
@@ -47,9 +47,103 @@ export default {
       return handleStream(req, env, url);
     }
 
+    if (url.pathname === "/texml") {
+      return handleTexml(req, env, ctx);
+    }
+
     return new Response("not found", { status: 404 });
   },
 };
+
+// ---------------------------------------------------------------------------
+// /texml — inbound TeXML webhook.
+//
+// Redundant path requested for POC testing:
+//   1. Return <Response><Pause length="5"/></Response> on the initial hit.
+//   2. Asynchronously POST a TeXML Update Call command that replaces the
+//      current verb queue with <Start><Stream/></Start><Pause/>, injecting
+//      the media stream into our /stream WS endpoint.
+//
+// In production you'd just return <Start><Stream/></Start> in step 1 — but
+// the customer wants to validate the Update Call REST flow.
+// ---------------------------------------------------------------------------
+
+async function handleTexml(
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  let form: FormData | null = null;
+  try {
+    form = await req.formData();
+  } catch { /* GET or non-form body */ }
+
+  const accountSid = form?.get("AccountSid")?.toString();
+  const callSid = form?.get("CallSid")?.toString();
+  console.log("inbound /texml", {
+    accountSid,
+    callSid,
+    from: form?.get("From")?.toString(),
+    to: form?.get("To")?.toString(),
+  });
+
+  if (accountSid && callSid) {
+    const streamUrl = new URL(req.url);
+    streamUrl.pathname = "/stream";
+    streamUrl.search =
+      "?source=telnyx-media-streaming&transcription_engine=Telnyx&language=en";
+    ctx.waitUntil(
+      updateCallWithStream(env, accountSid, callSid, streamUrl.toString()),
+    );
+  } else {
+    console.warn("missing AccountSid/CallSid; skipping update-call");
+  }
+
+  const xml =
+    `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Pause length="5"/>\n</Response>`;
+  return new Response(xml, {
+    status: 200,
+    headers: { "content-type": "application/xml" },
+  });
+}
+
+async function updateCallWithStream(
+  env: Env,
+  accountSid: string,
+  callSid: string,
+  wssUrl: string,
+): Promise<void> {
+  // XML-escape `&` so the query-string ampersands don't break the TeXML.
+  const wssEscaped = wssUrl.replace(/&/g, "&amp;");
+  const newTexml =
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<Response>\n` +
+    `  <Start>\n` +
+    `    <Stream url="${wssEscaped}"/>\n` +
+    `  </Start>\n` +
+    `  <Pause length="60"/>\n` +
+    `</Response>`;
+
+  const body = new URLSearchParams({ Texml: newTexml }).toString();
+  const url =
+    `https://api.telnyx.com/v2/texml/Accounts/${accountSid}/Calls/${callSid}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.TELNYX_API_KEY}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    console.error("update-call failed", res.status, txt);
+  } else {
+    console.log("update-call ok, stream injected for", callSid);
+  }
+}
 
 async function handleStream(_req: Request, env: Env, url: URL): Promise<Response> {
   if (!env.TELNYX_API_KEY) {

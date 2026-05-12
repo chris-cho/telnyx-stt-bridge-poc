@@ -52,10 +52,11 @@ or fan them out to another WS.
 - Telnyx Speech-to-Text streaming WebSocket API
 
 ## Endpoints
-| Method | Path      | Purpose                                    |
-|--------|-----------|--------------------------------------------|
-| GET    | `/`       | Health check                               |
-| GET    | `/stream` | WebSocket upgrade — bridges to Telnyx STT  |
+| Method | Path      | Purpose                                                         |
+|--------|-----------|-----------------------------------------------------------------|
+| GET    | `/`       | Health check                                                    |
+| GET    | `/stream` | WebSocket upgrade — bridges to Telnyx STT                       |
+| POST   | `/texml`  | Inbound TeXML webhook — returns `<Pause>` then injects `<Stream>` via Update Call REST |
 
 ## Audio format
 Telnyx STT WS expects **WAV** or **MP3** binary frames (selected via
@@ -97,17 +98,45 @@ websocat -b 'ws://localhost:8787/stream?transcription_engine=Telnyx&input_format
 ```
 
 ## Using with TeXML
-Return TeXML from your voice webhook to start a bidirectional stream
-into this bridge:
+Two options:
+
+### Option A — straight TeXML (simplest)
+Point your TeXML Application's Voice URL at any endpoint that returns:
 ```xml
 <Response>
   <Start>
-    <Stream url="wss://telnyx-stt-bridge-poc.solutions-2bd.workers.dev/stream?source=telnyx-media-streaming&amp;transcription_engine=Telnyx&amp;language=en" />
+    <Stream url="wss://telnyx-stt-bridge-poc.solutions-2bd.workers.dev/stream?source=telnyx-media-streaming&amp;transcription_engine=Telnyx&amp;language=en"/>
   </Start>
   <Pause length="60"/>
 </Response>
 ```
-Watch transcripts roll in with `npx wrangler tail --format=pretty`.
+
+### Option B — `/texml` + Update Call (POC validation path)
+Point your TeXML Application's Voice URL at this Worker's `/texml`:
+```
+https://telnyx-stt-bridge-poc.solutions-2bd.workers.dev/texml
+```
+On the inbound call, the Worker:
+1. Returns `<Response><Pause length="5"/></Response>` immediately.
+2. Asynchronously POSTs the Update Call REST command
+   (`POST /v2/texml/Accounts/{AccountSid}/Calls/{CallSid}`) with a new
+   TeXML body containing `<Start><Stream/></Start><Pause length="60"/>`,
+   replacing the current verb queue mid-call and starting the stream.
+
+Watch the full flow:
+```bash
+cd telnyx-stt-bridge-poc && npx wrangler tail --format=pretty
+```
+
+You should see, in order:
+```
+inbound /texml { accountSid, callSid, from, to }
+update-call ok, stream injected for <CallSid>
+media stream start: { sampleRate: 8000, channels: 1, encoding: "audio/x-mulaw" }
+[interim] (0.6) hello
+[final]   (0.92) hello world
+...
+```
 
 ## Deploy
 ```bash
